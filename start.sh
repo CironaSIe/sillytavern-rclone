@@ -12,6 +12,7 @@ LISTEN="${LISTEN:-true}"
 BASIC_AUTH_MODE="${BASIC_AUTH_MODE:-false}"
 BASIC_AUTH_USER="${BASIC_AUTH_USER:-}"
 SKIP_CONTENT_CHECK="${SKIP_CONTENT_CHECK:-true}"
+RCLONE_CONFIG="/home/node/.config/rclone/rclone.conf"
 
 # 验证环境变量
 if [ -z "$WEBDAV_SERVER" ] || [ "$WEBDAV_SERVER" = "https://your-webdav-server.com" ]; then
@@ -43,6 +44,7 @@ echo "DEBUG: LISTEN=$LISTEN"
 echo "DEBUG: BASIC_AUTH_MODE=$BASIC_AUTH_MODE"
 echo "DEBUG: BASIC_AUTH_USER=$BASIC_AUTH_USER"
 echo "DEBUG: SKIP_CONTENT_CHECK=$SKIP_CONTENT_CHECK"
+echo "DEBUG: RCLONE_CONFIG=$RCLONE_CONFIG"
 
 # 调试：检查 rclone
 echo "DEBUG: rclone version:"
@@ -51,7 +53,7 @@ rclone --version || echo "ERROR: rclone not found"
 # 配置 rclone
 echo "DEBUG: Configuring rclone..."
 mkdir -p /home/node/.config/rclone
-cat > /home/node/.config/rclone/rclone.conf << EOF
+cat > "$RCLONE_CONFIG" << EOF
 [webdav]
 type = webdav
 url = $WEBDAV_SERVER
@@ -59,12 +61,14 @@ vendor = other
 user = $WEBDAV_USERNAME
 pass = $(rclone obscure "$WEBDAV_PASSWORD")
 EOF
-chown node:node /home/node/.config/rclone/rclone.conf
-chmod 600 /home/node/.config/rclone/rclone.conf
+chown node:node "$RCLONE_CONFIG"
+chmod 600 "$RCLONE_CONFIG"
+echo "DEBUG: rclone.conf content:"
+cat "$RCLONE_CONFIG"
 
-# 初始同步：从 WebDAV 拉取数据
+# 以 node 用户进行初始同步
 echo "DEBUG: Initial sync from WebDAV to $DATA_DIR..."
-rclone sync webdav:/ "$DATA_DIR" --progress || {
+su -s /bin/bash node -c "rclone sync webdav:/ '$DATA_DIR' --config '$RCLONE_CONFIG' --progress" || {
   echo "WARNING: Initial WebDAV sync failed, proceeding with empty data directory"
   mkdir -p "$DATA_DIR"
 }
@@ -75,13 +79,9 @@ mkdir -p "$DATA_DIR"
 chown node:node "$DATA_DIR"
 chmod 777 "$DATA_DIR"
 
-# 启动定期同步（后台进程）
+# 启动定期同步（后台进程，以 node 用户运行）
 echo "DEBUG: Starting periodic sync every $SYNC_INTERVAL seconds..."
-while true; do
-  echo "DEBUG: Syncing $DATA_DIR to WebDAV..."
-  rclone sync "$DATA_DIR" webdav:/ --progress || echo "WARNING: Sync to WebDAV failed"
-  sleep "$SYNC_INTERVAL"
-done &
+su -s /bin/bash node -c "while true; do echo 'DEBUG: Syncing $DATA_DIR to WebDAV...'; rclone sync '$DATA_DIR' webdav:/ --config '$RCLONE_CONFIG' --progress || echo 'WARNING: Sync to WebDAV failed'; sleep $SYNC_INTERVAL; done" &
 
 # 生成 config.yaml
 echo "DEBUG: Generating config.yaml..."
@@ -91,6 +91,7 @@ port: $PORT
 listen: $LISTEN
 whitelistMode: $WHITELIST_MODE
 basicAuthMode: $BASIC_AUTH_MODE
+dataRoot: $DATA_DIR
 EOF
 
 # 添加 basicAuthUser
@@ -136,7 +137,7 @@ cd /home/node/SillyTavern || {
 # 安装 Node.js 依赖
 echo "DEBUG: Installing Node.js dependencies..."
 if [ -f "/home/node/SillyTavern/package.json" ]; then
-  npm install --no-audit || {
+  su -s /bin/bash node -c "npm install --no-audit" || {
     echo "ERROR: Failed to install Node.js dependencies"
     sleep infinity
   }
